@@ -17,11 +17,16 @@ class BaseInpainter:
 		"""
 		E2FGVI_checkpoint: checkpoint of inpainter (version hq, with multi-resolution support)
 		"""
-		net = importlib.import_module('inpainter.model.e2fgvi_hq')
-		self.model = net.InpaintGenerator().to(device)
-		self.model.load_state_dict(torch.load(E2FGVI_checkpoint, map_location=device))
-		self.model.eval()
 		self.device = device
+		self.model = None
+		try:
+			net = importlib.import_module('inpainter.model.e2fgvi_hq')
+			self.model = net.InpaintGenerator().to(device)
+			self.model.load_state_dict(torch.load(E2FGVI_checkpoint, map_location=device))
+			self.model.eval()
+		except ModuleNotFoundError as e:
+			# mmcv sometimes fails to install its C++/CUDA extension (mmcv._ext)
+			print(f"Inpainting disabled: missing dependency ({e}). Install mmcv-full to enable inpainting.")
 		# load configurations
 		with open("inpainter/config/config.yaml", 'r') as stream: 
 			config = yaml.safe_load(stream) 
@@ -183,6 +188,8 @@ class BaseInpainter:
 		Output:
 		inpainted_frames: numpy array, T, H, W, 3
 		"""
+		if self.model is None:
+			raise RuntimeError("Inpainting unavailable: mmcv is not installed (mmcv._ext missing).")
 		assert frames.shape[:3] == masks.shape, 'different size between frames and masks'
 		assert ratio > 0 and ratio <= 1, 'ratio must in (0, 1]'
 		

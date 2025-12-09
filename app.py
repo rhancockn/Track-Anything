@@ -1,4 +1,7 @@
 import gradio as gr
+Blocks = getattr(gr, "Blocks", None)
+if Blocks is None:
+    raise ImportError(f"gradio>=3.0 is required for this UI. Current version: {getattr(gr, '__version__', 'unknown')}")
 import argparse
 import gdown
 import cv2
@@ -18,8 +21,9 @@ import psutil
 import time
 try: 
     from mmcv.cnn import ConvModule
-except:
-    os.system("mim install mmcv")
+except ImportError:
+    ConvModule = None
+    print("mmcv is not installed; please install it manually (e.g., `pip install mmcv>=2` or `mim install mmcv`) if you need inpainting.")
 
 # download checkpoints
 def download_checkpoint(url, folder, filename):
@@ -159,13 +163,25 @@ def get_resize_ratio(resize_ratio_slider, interactive_state):
     return interactive_state
 
 # use sam to get the mask
-def sam_refine(video_state, point_prompt, click_state, interactive_state, evt:gr.SelectData):
+def sam_refine(*args):
     """
     Args:
         template_frame: PIL.Image
         point_prompt: flag for positive or negative button click
         click_state: [[points], [labels]]
     """
+    if len(args) == 5:
+        evt, video_state, point_prompt, click_state, interactive_state = args
+    elif len(args) == 4:
+        evt = None
+        video_state, point_prompt, click_state, interactive_state = args
+    else:
+        raise ValueError(f"sam_refine received unexpected arguments: {len(args)}")
+
+    if evt is None or not hasattr(evt, "index"):
+        operation_log = [("Error! Gradio version does not provide click coordinates; update gradio to use click-to-mask.", "Error"), ("","")]
+        return video_state["painted_images"][video_state["select_frame_number"]], video_state, interactive_state, operation_log
+
     if point_prompt == "Positive":
         coordinate = "[[{},{},1]]".format(evt.index[0], evt.index[1])
         interactive_state["positive_click_times"] += 1
@@ -318,8 +334,10 @@ def inpaint_video(video_state, interactive_state, mask_dropdown):
 
     try:
         inpainted_frames = model.baseinpainter.inpaint(frames, inpaint_masks, ratio=interactive_state["resize_ratio"])   # numpy array, T, H, W, 3
-    except:
-        operation_log = [("Error! You are trying to inpaint without masks input. Please track the selected mask first, and then press inpaint. If VRAM exceeded, please use the resize ratio to scaling down the image size.","Error"), ("","")]
+    except Exception as e:
+        error_msg = "Error! Inpainting failed. Please ensure masks are provided and mmcv-full is installed (mmcv._ext). If VRAM exceeded, use the resize ratio slider."
+        print(f"{error_msg} ({e})")
+        operation_log = [(error_msg, "Error"), ("","")]
         inpainted_frames = video_state["origin_images"]
     video_output = generate_video_from_frames(inpainted_frames, output_path="./result/inpaint/{}".format(video_state["video_name"]), fps=fps) # import video_input to name the output video
 
@@ -378,7 +396,24 @@ SAM_checkpoint = download_checkpoint(sam_checkpoint_url, folder, sam_checkpoint)
 xmem_checkpoint = download_checkpoint(xmem_checkpoint_url, folder, xmem_checkpoint)
 e2fgvi_checkpoint = download_checkpoint_from_google_drive(e2fgvi_checkpoint_id, folder, e2fgvi_checkpoint)
 args.port = 12212
-args.device = "cuda:3"
+# Pick the best available device. Respect the CLI-specified device when it is usable,
+# otherwise fall back to MPS on Apple Silicon, then CUDA, then CPU.
+def resolve_device(preferred: str) -> str:
+    if preferred:
+        if preferred.startswith("cuda") and torch.cuda.is_available():
+            return preferred
+        if preferred == "mps" and torch.backends.mps.is_available():
+            return "mps"
+        if preferred == "cpu":
+            return "cpu"
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda:0"
+    return "cpu"
+
+args.device = resolve_device(args.device)
+print(f"Running with device: {args.device}")
 # args.mask_save = True
 
 # initialize sam, xmem, e2fgvi models
@@ -390,7 +425,7 @@ title = """<p><h1 align="center">Track-Anything</h1></p>
 description = """<p>Gradio demo for Track Anything, a flexible and interactive tool for video object tracking, segmentation, and inpainting. I To use it, simply upload your video, or click one of the examples to load them. Code: <a href="https://github.com/gaomingqi/Track-Anything">https://github.com/gaomingqi/Track-Anything</a> <a href="https://huggingface.co/spaces/watchtowerss/Track-Anything?duplicate=true"><img style="display: inline; margin-top: 0em; margin-bottom: 0em" src="https://bit.ly/3gLdBN6" alt="Duplicate Space" /></a></p>"""
 
 
-with gr.Blocks() as iface:
+with Blocks() as iface:
     """
         state for 
     """
@@ -429,7 +464,8 @@ with gr.Blocks() as iface:
         # for user video input
         with gr.Column():
             with gr.Row(scale=0.4):
-                video_input = gr.Video(autosize=True)
+                # autosize is not supported in newer Gradio versions; rely on default sizing
+                video_input = gr.Video()
                 with gr.Column():
                     video_info = gr.Textbox(label="Video Info")
                     resize_info = gr.Textbox(value="If you want to use the inpaint function, it is best to git clone the repo and use a machine with more VRAM locally. \
@@ -454,16 +490,16 @@ with gr.Blocks() as iface:
                                 interactive=True,
                                 visible=False)
                             remove_mask_button = gr.Button(value="Remove mask", interactive=True, visible=False) 
-                            clear_button_click = gr.Button(value="Clear clicks", interactive=True, visible=False).style(height=160)
+                            clear_button_click = gr.Button(value="Clear clicks", interactive=True, visible=False)
                             Add_mask_button = gr.Button(value="Add mask", interactive=True, visible=False)
-                    template_frame = gr.Image(type="pil",interactive=True, elem_id="template_frame", visible=False).style(height=360)
+                    template_frame = gr.Image(type="pil",interactive=True, elem_id="template_frame", visible=False)
                     image_selection_slider = gr.Slider(minimum=1, maximum=100, step=1, value=1, label="Track start frame", visible=False)
                     track_pause_number_slider = gr.Slider(minimum=1, maximum=100, step=1, value=1, label="Track end frame", visible=False)
             
                 with gr.Column():
                     run_status = gr.HighlightedText(value=[("Text","Error"),("to be","Label 2"),("highlighted","Label 3")], visible=False)
                     mask_dropdown = gr.Dropdown(multiselect=True, value=[], label="Mask selection", info=".", visible=False)
-                    video_output = gr.Video(autosize=True, visible=False).style(height=360)
+                    video_output = gr.Video(visible=False)
                     with gr.Row():
                         tracking_video_predict_button = gr.Button(value="Tracking", visible=False)
                         inpaint_video_predict_button = gr.Button(value="Inpainting", visible=False)
@@ -481,7 +517,7 @@ with gr.Blocks() as iface:
 
     # second step: select images from slider
     image_selection_slider.release(fn=select_template, 
-                                   inputs=[image_selection_slider, video_state, interactive_state], 
+                                   inputs=[image_selection_slider, video_state, interactive_state, mask_dropdown], 
                                    outputs=[template_frame, video_state, interactive_state, run_status], api_name="select_image")
     track_pause_number_slider.release(fn=get_end_number, 
                                    inputs=[track_pause_number_slider, video_state, interactive_state], 
@@ -597,6 +633,6 @@ with gr.Blocks() as iface:
         outputs=[video_input],
         # cache_examples=True,
     ) 
-iface.queue(concurrency_count=1)
-iface.launch(debug=True, enable_queue=True, server_port=args.port, server_name="0.0.0.0")
+iface.queue()
+iface.launch(debug=True, server_port=args.port, server_name="0.0.0.0")
 # iface.launch(debug=True, enable_queue=True)
